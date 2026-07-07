@@ -11,16 +11,21 @@ import base64
 app = FastAPI()
 
 
+# Assigned values
 TOTAL_ORDERS = 55
 RATE_LIMIT = 17
-WINDOW = 10
+WINDOW_SECONDS = 10
 
 
-# Allow the TDS exam page
+# -----------------------------
+# CORS
+# -----------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://exam.sanand.workers.dev"
+        "https://exam.sanand.workers.dev",
+        "https://app-6baaqu.example.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -28,9 +33,9 @@ app.add_middleware(
 )
 
 
-# -------------------------
-# Fixed order catalog
-# -------------------------
+# -----------------------------
+# Fixed catalog 1..55
+# -----------------------------
 
 catalog = [
     {
@@ -41,22 +46,22 @@ catalog = [
 ]
 
 
-# -------------------------
+# -----------------------------
 # Idempotency storage
-# -------------------------
+# -----------------------------
 
-idempotency_keys = {}
+idempotency_store = {}
 
 
-# -------------------------
-# Rate limiter
-# -------------------------
+# -----------------------------
+# Rate limiting storage
+# -----------------------------
 
-rate_buckets = defaultdict(deque)
+client_requests = defaultdict(deque)
 
 
 @app.middleware("http")
-async def rate_limit(request: Request, call_next):
+async def rate_limit_middleware(request: Request, call_next):
 
     client_id = request.headers.get(
         "X-Client-Id",
@@ -65,9 +70,10 @@ async def rate_limit(request: Request, call_next):
 
     now = time.monotonic()
 
-    bucket = rate_buckets[client_id]
+    bucket = client_requests[client_id]
 
-    while bucket and now - bucket[0] >= WINDOW:
+    # Remove expired requests
+    while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
 
     if len(bucket) >= RATE_LIMIT:
@@ -82,26 +88,26 @@ async def rate_limit(request: Request, call_next):
 
         return response
 
-
     bucket.append(now)
 
     return await call_next(request)
 
 
 
-# -------------------------
+# -----------------------------
 # POST /orders
-# -------------------------
+# -----------------------------
 
 @app.post("/orders", status_code=201)
 async def create_order(
     Idempotency_Key: str | None = Header(default=None)
 ):
 
+    # Same key returns same order
     if Idempotency_Key:
 
-        if Idempotency_Key in idempotency_keys:
-            return idempotency_keys[Idempotency_Key]
+        if Idempotency_Key in idempotency_store:
+            return idempotency_store[Idempotency_Key]
 
 
     order = {
@@ -111,23 +117,24 @@ async def create_order(
 
 
     if Idempotency_Key:
-        idempotency_keys[Idempotency_Key] = order
+        idempotency_store[Idempotency_Key] = order
 
 
     return order
 
 
 
-# -------------------------
+# -----------------------------
 # GET /orders pagination
-# -------------------------
+# -----------------------------
 
 @app.get("/orders")
-async def list_orders(
+async def get_orders(
     limit: int = 10,
     cursor: str | None = None
 ):
 
+    # Decode cursor
     if cursor:
         start = int(
             base64.urlsafe_b64decode(
@@ -138,6 +145,7 @@ async def list_orders(
         start = 1
 
 
+    # Never exceed limit
     end = min(
         start + limit - 1,
         TOTAL_ORDERS
@@ -147,10 +155,13 @@ async def list_orders(
     items = catalog[start - 1:end]
 
 
+    # Generate next cursor
     if end < TOTAL_ORDERS:
+
         next_cursor = base64.urlsafe_b64encode(
             str(end + 1).encode()
         ).decode()
+
     else:
         next_cursor = None
 
