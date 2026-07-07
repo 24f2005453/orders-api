@@ -9,30 +9,29 @@ import base64
 
 app = FastAPI()
 
-# ----------------------------
+# ----------------------------------------------------
 # Assignment values
-# ----------------------------
+# ----------------------------------------------------
 
 TOTAL_ORDERS = 55
 RATE_LIMIT = 17
 WINDOW_SECONDS = 10
 
-# ----------------------------
+# ----------------------------------------------------
 # CORS
-# ----------------------------
+# ----------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Retry-After"],
 )
 
-# ----------------------------
+# ----------------------------------------------------
 # Fixed catalog
-# ----------------------------
+# ----------------------------------------------------
 
 catalog = [
     {
@@ -42,34 +41,35 @@ catalog = [
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-# ----------------------------
-# In-memory stores
-# ----------------------------
+# ----------------------------------------------------
+# Storage
+# ----------------------------------------------------
 
 idempotency_store = {}
-
 client_requests = defaultdict(deque)
 
-# ----------------------------
-# Rate Limiting Middleware
-# ----------------------------
+# ----------------------------------------------------
+# Rate limiting
+# ----------------------------------------------------
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
-    # Allow CORS preflight requests through
+    # Don't rate-limit CORS preflight
     if request.method == "OPTIONS":
         return await call_next(request)
 
     client_id = request.headers.get("X-Client-Id", "anonymous")
 
     now = time.monotonic()
+
     bucket = client_requests[client_id]
 
     while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
 
     if len(bucket) >= RATE_LIMIT:
+
         retry_after = max(
             1,
             int(WINDOW_SECONDS - (now - bucket[0])) + 1
@@ -77,18 +77,42 @@ async def rate_limit(request: Request, call_next):
 
         response = JSONResponse(
             status_code=429,
-            content={"detail": "Rate limit exceeded"}
+            content={
+                "detail": "Rate limit exceeded"
+            }
         )
+
         response.headers["Retry-After"] = str(retry_after)
+
         return response
 
     bucket.append(now)
 
     return await call_next(request)
 
-# ----------------------------
+# ----------------------------------------------------
+# Root
+# ----------------------------------------------------
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Orders API Running"
+    }
+
+# ----------------------------------------------------
+# Health
+# ----------------------------------------------------
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok"
+    }
+
+# ----------------------------------------------------
 # POST /orders
-# ----------------------------
+# ----------------------------------------------------
 
 @app.post("/orders")
 async def create_order(
@@ -98,14 +122,12 @@ async def create_order(
     )
 ):
 
-    if idempotency_key:
+    if idempotency_key and idempotency_key in idempotency_store:
 
-        if idempotency_key in idempotency_store:
-
-            return JSONResponse(
-                status_code=201,
-                content=idempotency_store[idempotency_key]
-            )
+        return JSONResponse(
+            status_code=201,
+            content=idempotency_store[idempotency_key]
+        )
 
     order = {
         "id": str(uuid4()),
@@ -120,9 +142,9 @@ async def create_order(
         content=order
     )
 
-# ----------------------------
+# ----------------------------------------------------
 # GET /orders
-# ----------------------------
+# ----------------------------------------------------
 
 @app.get("/orders")
 async def list_orders(
@@ -130,10 +152,9 @@ async def list_orders(
     cursor: str | None = None
 ):
 
-    limit = max(1, limit)
+    limit = max(1, min(limit, TOTAL_ORDERS))
 
     if cursor:
-
         try:
             start = int(
                 base64.urlsafe_b64decode(
@@ -142,44 +163,24 @@ async def list_orders(
             )
         except Exception:
             start = 1
-
     else:
+        start = 1
+
+    if start < 1:
         start = 1
 
     end = min(start + limit - 1, TOTAL_ORDERS)
 
     items = catalog[start - 1:end]
 
-    if end < TOTAL_ORDERS:
+    next_cursor = None
 
+    if end < TOTAL_ORDERS:
         next_cursor = base64.urlsafe_b64encode(
             str(end + 1).encode()
         ).decode()
 
-    else:
-        next_cursor = None
-
     return {
         "items": items,
         "next_cursor": next_cursor
-    }
-
-# ----------------------------
-# Root
-# ----------------------------
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Orders API Running"
-    }
-
-# ----------------------------
-# Health
-# ----------------------------
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok"
     }
