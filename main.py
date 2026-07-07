@@ -57,17 +57,19 @@ client_requests = defaultdict(deque)
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
+    # Allow CORS preflight requests through
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     client_id = request.headers.get("X-Client-Id", "anonymous")
 
     now = time.monotonic()
-
     bucket = client_requests[client_id]
 
     while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
 
     if len(bucket) >= RATE_LIMIT:
-
         retry_after = max(
             1,
             int(WINDOW_SECONDS - (now - bucket[0])) + 1
@@ -75,13 +77,9 @@ async def rate_limit(request: Request, call_next):
 
         response = JSONResponse(
             status_code=429,
-            content={
-                "detail": "Rate limit exceeded"
-            }
+            content={"detail": "Rate limit exceeded"}
         )
-
         response.headers["Retry-After"] = str(retry_after)
-
         return response
 
     bucket.append(now)
